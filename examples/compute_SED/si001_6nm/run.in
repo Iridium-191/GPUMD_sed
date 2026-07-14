@@ -1,0 +1,14 @@
+# 5.9741 nm diamond-Si, z parallel to [001].
+potential    ../../../potentials/tersoff/Si_Tersoff_1989.txt
+time_step    1
+velocity     300
+
+# Equilibrate before SED collection.
+ensemble     nvt_lan 300 300 100
+dump_thermo  1000
+run          20000
+
+# NVE production: a/4 spatial grid, 4096 frames at 5 fs spacing.
+ensemble     nve
+compute_SED  4096 100 59.742 59.742 1.35778
+run          20480
