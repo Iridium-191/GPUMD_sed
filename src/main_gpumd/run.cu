@@ -14,6 +14,11 @@
 */
 
 /*----------------------------------------------------------------------------80
+Modified by RuilinMao, ICQM, Peking University on 2026-07-14:
+Added compute_SED input dispatch.
+------------------------------------------------------------------------------*/
+
+/*----------------------------------------------------------------------------80
 Run simulation according to the inputs in the run.in file.
 ------------------------------------------------------------------------------*/
 
@@ -30,9 +35,7 @@ Run simulation according to the inputs in the run.in file.
 #include "measure/adf.cuh"
 #include "measure/angular_rdf.cuh"
 #include "measure/compute.cuh"
-#include "measure/compute_chunk.cuh"
 #include "measure/compute_dpdt.cuh"
-#include "measure/compute_es.cuh"
 #include "measure/dos.cuh"
 #include "measure/dump_beads.cuh"
 #include "measure/dump_dipole.cuh"
@@ -55,7 +58,6 @@ Run simulation according to the inputs in the run.in file.
 #include "measure/lsqt.cuh"
 #include "measure/measure.cuh"
 #include "measure/modal_analysis.cuh"
-#include "measure/iron_conductivity.cuh"
 #include "measure/msd.cuh"
 #include "measure/orientorder.cuh"
 #include "measure/plumed.cuh"
@@ -63,6 +65,7 @@ Run simulation according to the inputs in the run.in file.
 #include "measure/rdf.cuh"
 #include "measure/sdc.cuh"
 #include "measure/shc.cuh"
+#include "measure/sed.cuh"
 #include "measure/viscosity.cuh"
 #include "minimize/minimize.cuh"
 #include "model/box.cuh"
@@ -159,7 +162,10 @@ Run::Run()
   velocity.initialize(
     has_velocity_in_xyz,
     300,
-    atom,
+    atom.cpu_mass,
+    atom.cpu_position_per_atom,
+    atom.cpu_velocity_per_atom,
+    atom.velocity_per_atom,
     false,
     123);
   if (has_velocity_in_xyz) {
@@ -251,7 +257,14 @@ void Run::perform_a_run()
 
   for (int step = 0; step < number_of_steps; ++step) {
 
-    velocity.correct_velocity(step, group, atom);
+    velocity.correct_velocity(
+      step,
+      group,
+      atom.cpu_mass,
+      atom.position_per_atom,
+      atom.cpu_position_per_atom,
+      atom.cpu_velocity_per_atom,
+      atom.velocity_per_atom);
 
     calculate_time_step(
       max_distance_per_step, atom.velocity_per_atom, initial_time_step, time_step);
@@ -362,23 +375,51 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
       param,
       num_param,
       integrate.fixed_group,
-      integrate.fixed_grouping_method,
       force,
       box,
-      atom,
-      group);
+      atom.position_per_atom,
+      atom.type,
+      group,
+      atom.potential_per_atom,
+      atom.force_per_atom,
+      atom.virial_per_atom);
   } else if (strcmp(param[0], "compute_phonon") == 0) {
     Hessian hessian;
     hessian.parse(param, num_param);
-    hessian.compute(force, box, atom, group);
+    hessian.compute(
+      force,
+      box,
+      atom.cpu_position_per_atom,
+      atom.position_per_atom,
+      atom.type,
+      group,
+      atom.potential_per_atom,
+      atom.force_per_atom,
+      atom.virial_per_atom);
   } else if (strcmp(param[0], "compute_cohesive") == 0) {
     Cohesive cohesive;
     cohesive.parse(param, num_param, 0);
-    cohesive.compute(box, atom, group, force);
+    cohesive.compute(
+      box,
+      atom.position_per_atom,
+      atom.type,
+      group,
+      atom.potential_per_atom,
+      atom.force_per_atom,
+      atom.virial_per_atom,
+      force);
   } else if (strcmp(param[0], "compute_elastic") == 0) {
     Cohesive cohesive;
     cohesive.parse(param, num_param, 1);
-    cohesive.compute(box, atom, group, force);
+    cohesive.compute(
+      box,
+      atom.position_per_atom,
+      atom.type,
+      group,
+      atom.potential_per_atom,
+      atom.force_per_atom,
+      atom.virial_per_atom,
+      force);
   } else if (strcmp(param[0], "change_box") == 0) {
     parse_change_box(param, num_param);
   } else if (strcmp(param[0], "velocity") == 0) {
@@ -469,6 +510,10 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     std::unique_ptr<Property> property;
     property.reset(new DOS(param, num_param, group));
     measure.properties.emplace_back(std::move(property));
+  } else if (strcmp(param[0], "compute_SED") == 0) {
+    std::unique_ptr<Property> property;
+    property.reset(new SED(param, num_param, group));
+    measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "compute_sdc") == 0) {
     std::unique_ptr<Property> property;
     property.reset(new SDC(param, num_param, group));
@@ -476,10 +521,6 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
   } else if (strcmp(param[0], "compute_msd") == 0) {
     std::unique_ptr<Property> property;
     property.reset(new MSD(param, num_param, group, atom));
-    measure.properties.emplace_back(std::move(property));
-  } else if (strcmp(param[0], "compute_ic") == 0) {
-    std::unique_ptr<Property> property;
-    property.reset(new IC(param, num_param, atom));
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "compute_rdf") == 0) {
     std::unique_ptr<Property> property;
@@ -500,10 +541,6 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
   } else if (strcmp(param[0], "compute_dpdt") == 0) {
     std::unique_ptr<Property> property;
     property.reset(new Compute_dpdt(param, num_param));
-    measure.properties.emplace_back(std::move(property));
-  } else if (strcmp(param[0], "compute_es") == 0) {
-    std::unique_ptr<Property> property;
-    property.reset(new Compute_es(param, num_param));
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "compute_hac") == 0) {
     std::unique_ptr<Property> property;
@@ -535,10 +572,6 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "deform") == 0) {
     integrate.parse_deform(param, num_param);
-  } else if (strcmp(param[0], "compute_chunk") == 0) {
-    std::unique_ptr<Property> property;
-    property.reset(new ComputeChunk(param, num_param, box));
-    measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "compute") == 0) {
     std::unique_ptr<Property> property;
     property.reset(new Compute(param, num_param, group));
@@ -599,7 +632,10 @@ void Run::parse_velocity(const char** param, int num_param)
   velocity.initialize(
     has_velocity_in_xyz,
     initial_temperature,
-    atom,
+    atom.cpu_mass,
+    atom.cpu_position_per_atom,
+    atom.cpu_velocity_per_atom,
+    atom.velocity_per_atom,
     use_seed,
     seed);
   if (!has_velocity_in_xyz) {
